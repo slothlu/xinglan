@@ -1,0 +1,93 @@
+name: Build unsigned iPhone IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Locate or extract project
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f "Xinglan.xcodeproj/project.pbxproj" ]; then
+            PROJECT_DIR="$GITHUB_WORKSPACE"
+          elif [ -f "Xinglan-iPhone.zip" ]; then
+            DEST="$RUNNER_TEMP/xinglan-source"
+            mkdir -p "$DEST"
+            ditto -x -k "$GITHUB_WORKSPACE/Xinglan-iPhone.zip" "$DEST"
+            if [ -f "$DEST/Xinglan-iPhone/Xinglan.xcodeproj/project.pbxproj" ]; then
+              PROJECT_DIR="$DEST/Xinglan-iPhone"
+            elif [ -f "$DEST/Xinglan.xcodeproj/project.pbxproj" ]; then
+              PROJECT_DIR="$DEST"
+            else
+              echo "::error::ZIP does not contain Xinglan.xcodeproj. Upload the latest source package."
+              exit 1
+            fi
+          else
+            echo "::error::Upload Xinglan-iPhone.zip or the extracted project to the repository root."
+            exit 1
+          fi
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+      - name: Show Xcode version
+        run: xcodebuild -version
+      - name: Test API transport without network or API keys
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          xcrun swiftc -swift-version 5 -parse-as-library App/AITransport.swift Tests/APIContractTests.swift -o /tmp/xinglan-api-tests
+          /tmp/xinglan-api-tests
+      - name: Build iPhone app and widget without signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          xcodebuild \
+            -project Xinglan.xcodeproj \
+            -scheme Xinglan \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee "$GITHUB_WORKSPACE/xcodebuild.log"
+      - name: Package unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          APP="build/Build/Products/Release-iphoneos/Xinglan.app"
+          test -f "$APP/Xinglan"
+          test -d "$APP/PlugIns/XinglanWidget.appex"
+          mkdir -p package/Payload
+          ditto "$APP" package/Payload/Xinglan.app
+          cd package
+          zip -qry "$GITHUB_WORKSPACE/Xinglan-unsigned.ipa" Payload
+          cd ..
+          cd "$GITHUB_WORKSPACE"
+          shasum -a 256 Xinglan-unsigned.ipa > SHA256.txt
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xinglan-unsigned-IPA
+          path: |
+            Xinglan-unsigned.ipa
+            SHA256.txt
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xcode-build-log
+          path: xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7
