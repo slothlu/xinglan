@@ -16,11 +16,407 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 45
     steps:
-      - name: 检出启动器源码
+      - name: 下载启动器源码
         uses: actions/checkout@v4
         with:
+          repository: AngelAuraMC/Amethyst-iOS
+          ref: f98c4133c72d39e06ceac42b57cc4477c52105fc
           submodules: recursive
           persist-credentials: false
+          path: launcher
+
+      - name: 应用混沌启动器改动
+        working-directory: launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch_file="$RUNNER_TEMP/chaos-launcher.patch"
+          cat > "$patch_file" <<'CHAOS_SOURCE_PATCH'
+          diff --git a/Makefile b/Makefile
+          --- a/Makefile
+          +++ b/Makefile
+          @@ -105,6 +105,8 @@
+           endif
+           
+           AME_BUNDLE_DIR      ?= $(OUTPUTDIR)/AngelAuraAmethyst.app
+          +PACKAGE_BUNDLE_ID   ?= org.angelauramc.amethyst
+          +PACKAGE_ENTITLEMENTS ?= $(SOURCEDIR)/entitlements.sideload.xml
+           AME_JRE8_DIR        ?= $(SOURCEDIR)/depends/java-8-openjdk
+           AME_JRE17_DIR       ?= $(SOURCEDIR)/depends/java-17-openjdk
+           AME_JRE21_DIR       ?= $(SOURCEDIR)/depends/java-21-openjdk
+          @@ -353,6 +355,7 @@
+           	cp -R $(SOURCEDIR)/JavaApp/libs/caciocavallo17/* $(WORKINGDIR)/AngelAuraAmethyst.app/libs_caciocavallo17 || exit 1
+           	$(call METHOD_DIRCHECK,$(OUTPUTDIR)/Payload)
+           	cp -R $(WORKINGDIR)/AngelAuraAmethyst.app $(OUTPUTDIR)/Payload
+          +	plutil -replace CFBundleIdentifier -string "$(PACKAGE_BUNDLE_ID)" $(OUTPUTDIR)/Payload/AngelAuraAmethyst.app/Info.plist
+           	if [ '$(SLIMMED_ONLY)' != '1' ]; then \
+           		cp -R $(OUTPUTDIR)/java_runtimes $(OUTPUTDIR)/Payload/AngelAuraAmethyst.app; \
+           	fi
+          @@ -362,7 +365,7 @@
+           	elif [ '$(PLATFORM)' == '6' ]; then \
+           		ldid -S$(SOURCEDIR)/entitlements.codesign.xml $(OUTPUTDIR)/Payload/AngelAuraAmethyst.app/AngelAuraAmethyst; \
+           	else \
+          -		ldid -S$(SOURCEDIR)/entitlements.sideload.xml $(OUTPUTDIR)/Payload/AngelAuraAmethyst.app/AngelAuraAmethyst; \
+          +		ldid -S$(PACKAGE_ENTITLEMENTS) $(OUTPUTDIR)/Payload/AngelAuraAmethyst.app/AngelAuraAmethyst; \
+           	fi
+           	chmod -R 755 $(OUTPUTDIR)/Payload
+           	if [ '$(PLATFORM)' != '2' ]; then \
+          diff --git a/Natives/CMakeLists.txt b/Natives/CMakeLists.txt
+          --- a/Natives/CMakeLists.txt
+          +++ b/Natives/CMakeLists.txt
+          @@ -146,6 +146,7 @@
+             JavaGUIViewController.m
+             LauncherMenuViewController.m
+             LauncherNavigationController.m
+          +  ChaosPackViewController.m
+             LauncherNewsViewController.m
+             LauncherPreferences.m
+             LauncherPreferencesViewController.m
+          diff --git a/Natives/Info.plist b/Natives/Info.plist
+          --- a/Natives/Info.plist
+          +++ b/Natives/Info.plist
+          @@ -9,7 +9,7 @@
+           	<key>CFBundleDevelopmentRegion</key>
+           	<string>en</string>
+           	<key>CFBundleDisplayName</key>
+          -	<string>Amethyst</string>
+          +	<string>混沌启动器</string>
+           	<key>CFBundleExecutable</key>
+           	<string>AngelAuraAmethyst</string>
+           	<key>CFBundleIcons</key>
+          diff --git a/Natives/LauncherMenuViewController.m b/Natives/LauncherMenuViewController.m
+          --- a/Natives/LauncherMenuViewController.m
+          +++ b/Natives/LauncherMenuViewController.m
+          @@ -64,6 +64,10 @@
+                   [LauncherMenuCustomItem vcClass:LauncherProfilesViewController.class],
+                   [LauncherMenuCustomItem vcClass:LauncherPreferencesViewController.class],
+               ].mutableCopy;
+          +    if (realUIIdiom != UIUserInterfaceIdiomTV) {
+          +        [self.options addObject:[LauncherMenuCustomItem title:@"混沌整合包"
+          +            imageName:@"shippingbox" action:^{ [contentNavigationController showChaosPack]; }]];
+          +    }
+               if (realUIIdiom != UIUserInterfaceIdiomTV) {
+                   [self.options addObject:(id)[LauncherMenuCustomItem
+                                                title:localize(@"launcher.menu.custom_controls", nil)
+          diff --git a/Natives/LauncherNavigationController.m b/Natives/LauncherNavigationController.m
+          --- a/Natives/LauncherNavigationController.m
+          +++ b/Natives/LauncherNavigationController.m
+          @@ -2,6 +2,7 @@
+           #import "authenticator/BaseAuthenticator.h"
+           #import "AFNetworking.h"
+           #import "ALTServerConnection.h"
+          +#import "ChaosPackViewController.h"
+           #import "CustomControlsViewController.h"
+           #import "DownloadProgressViewController.h"
+           #import "JavaGUIViewController.h"
+          @@ -162,6 +163,15 @@
+               return isDirectory;
+           }
+           
+          +- (void)showChaosPack {
+          +    if (self.task || self.presentedViewController) return;
+          +    ChaosPackViewController *pack = [[ChaosPackViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+          +    __weak LauncherNavigationController *navigation = self;
+          +    pack.didSelectProfile = ^{ [navigation reloadProfileList]; };
+          +    UINavigationController *sheet = [[UINavigationController alloc] initWithRootViewController:pack];
+          +    [self presentViewController:sheet animated:YES completion:nil];
+          +}
+          +
+           - (void)fetchLocalVersionList {
+               if (!localVersionList) {
+                   localVersionList = [NSMutableArray new];
+          diff --git a/Natives/LauncherNavigationController.h b/Natives/LauncherNavigationController.h
+          --- a/Natives/LauncherNavigationController.h
+          +++ b/Natives/LauncherNavigationController.h
+          @@ -9,6 +9,7 @@
+           
+           - (void)enterModInstallerWithPath:(NSString *)path hitEnterAfterWindowShown:(BOOL)hitEnter;
+           - (void)fetchLocalVersionList;
+          +- (void)showChaosPack;
+           - (void)setInteractionEnabled:(BOOL)enable forDownloading:(BOOL)downloading;
+           
+           @end
+          diff --git a/Natives/ChaosPackViewController.h b/Natives/ChaosPackViewController.h
+          new file mode 100644
+          --- /dev/null
+          +++ b/Natives/ChaosPackViewController.h
+          @@ -0,0 +1,5 @@
+          +#import <UIKit/UIKit.h>
+          +
+          +@interface ChaosPackViewController : UITableViewController
+          +@property(nonatomic, copy) void (^didSelectProfile)(void);
+          +@end
+          diff --git a/Natives/ChaosPackViewController.m b/Natives/ChaosPackViewController.m
+          new file mode 100644
+          --- /dev/null
+          +++ b/Natives/ChaosPackViewController.m
+          @@ -0,0 +1,201 @@
+          +#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+          +#import "ChaosPackViewController.h"
+          +#import "LauncherPreferences.h"
+          +#import "PLProfiles.h"
+          +#import "ios_uikit_bridge.h"
+          +#include <stdlib.h>
+          +
+          +static NSString *const ChaosVersion = @"1.20.1-forge-47.4.23";
+          +static NSString *const ChaosProfile = @"混沌版 · Forge 1.20.1";
+          +static NSString *const ChaosDirectory = @"custom_gamedir/chaos";
+          +
+          +@interface ChaosPackViewController () <UIDocumentPickerDelegate>
+          +@property(nonatomic) BOOL importing;
+          +@end
+          +
+          +@implementation ChaosPackViewController
+          +
+          +- (void)viewDidLoad {
+          +    [super viewDidLoad];
+          +    self.title = @"混沌整合包";
+          +    self.tableView.rowHeight = UITableViewAutomaticDimension;
+          +    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
+          +        initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(close)];
+          +}
+          +
+          +- (void)close {
+          +    [self dismissViewControllerAnimated:YES completion:nil];
+          +}
+          +
+          +- (NSURL *)instanceURL {
+          +    return [NSURL fileURLWithPath:@(getenv("GAME_DIR")) isDirectory:YES];
+          +}
+          +
+          +- (NSURL *)chaosURLInInstance:(NSURL *)instance {
+          +    return [[instance URLByAppendingPathComponent:@"custom_gamedir" isDirectory:YES]
+          +        URLByAppendingPathComponent:@"chaos" isDirectory:YES];
+          +}
+          +
+          +- (BOOL)hasForge {
+          +    NSURL *versions = [[self instanceURL] URLByAppendingPathComponent:@"versions" isDirectory:YES];
+          +    NSURL *metadata = [[versions URLByAppendingPathComponent:ChaosVersion isDirectory:YES]
+          +        URLByAppendingPathComponent:[ChaosVersion stringByAppendingPathExtension:@"json"]];
+          +    return [NSFileManager.defaultManager fileExistsAtPath:metadata.path];
+          +}
+          +
+          +- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 2; }
+          +
+          +- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+          +    return section == 0 ? 2 : 3;
+          +}
+          +
+          +- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+          +    return section == 0 ? @"本地实例" : @"整合包文件";
+          +}
+          +
+          +- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+          +    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+          +    UIListContentConfiguration *content = [UIListContentConfiguration subtitleCellConfiguration];
+          +    content.secondaryTextProperties.numberOfLines = 0;
+          +    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+          +    if (indexPath.section == 0 && indexPath.row == 0) {
+          +        content.text = @"Minecraft 1.20.1 · Java 17";
+          +        content.secondaryText = [self hasForge] ? @"Forge 47.4.23 已安装"
+          +            : @"先在「配置」的加号菜单选 Forge，安装 1.20.1 的 47.4.23。";
+          +    } else if (indexPath.section == 0) {
+          +        content.text = @"选用混沌版配置";
+          +        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+          +        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+          +    } else if (indexPath.row == 0) {
+          +        content.text = @"导入整合包文件夹";
+          +        content.secondaryText = self.importing ? @"正在复制文件…" : @"选择含 mods 文件夹的已解压目录。";
+          +        cell.selectionStyle = self.importing ? UITableViewCellSelectionStyleNone : UITableViewCellSelectionStyleDefault;
+          +        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+          +    } else if (indexPath.row == 1) {
+          +        NSURL *target = [self chaosURLInInstance:self.instanceURL];
+          +        content.text = [NSFileManager.defaultManager fileExistsAtPath:target.path] ? @"已存在本地整合包" : @"尚未导入";
+          +        content.secondaryText = @"文件位置为当前实例的 custom_gamedir/chaos，可以用「文件」App 管理。";
+          +    } else {
+          +        content.text = @"JIT 与签名";
+          +        content.secondaryText = getEntitlementValue(@"get-task-allow")
+          +            ? @"当前签名允许调试。启动 Java 时仍需让启动器检测到本次运行的 JIT。"
+          +            : @"当前签名未提供调试权限。请在云打包后使用支持开发调试的签名安装。";
+          +    }
+          +    cell.contentConfiguration = content;
+          +    return cell;
+          +}
+          +
+          +- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+          +    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+          +    if (self.importing) return;
+          +    if (indexPath.section == 0 && indexPath.row == 1) {
+          +        if (![self hasForge]) {
+          +            showDialog(@"尚未安装 Forge", @"请先在「配置」里安装 Forge 1.20.1 / 47.4.23，再回来选择混沌版。");
+          +            return;
+          +        }
+          +        NSURL *mods = [[self chaosURLInInstance:self.instanceURL] URLByAppendingPathComponent:@"mods" isDirectory:YES];
+          +        if (![NSFileManager.defaultManager fileExistsAtPath:mods.path]) {
+          +            showDialog(@"尚未导入整合包", @"请先导入含 mods 文件夹的整合包目录。");
+          +            return;
+          +        }
+          +        [PLProfiles updateCurrent];
+          +        PLProfiles *profiles = PLProfiles.current;
+          +        if (!profiles.profiles[ChaosProfile]) {
+          +            profiles.profiles[ChaosProfile] = [@{
+          +                @"name": ChaosProfile, @"lastVersionId": ChaosVersion,
+          +                @"gameDir": ChaosDirectory, @"javaVersion": @"17"
+          +            } mutableCopy];
+          +        }
+          +        [profiles setSelectedProfileName:ChaosProfile];
+          +        [self dismissViewControllerAnimated:YES completion:self.didSelectProfile];
+          +    } else if (indexPath.section == 1 && indexPath.row == 0) {
+          +        UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc]
+          +            initForOpeningContentTypes:@[UTTypeFolder] asCopy:NO];
+          +        picker.delegate = self;
+          +        [self presentViewController:picker animated:YES completion:nil];
+          +    }
+          +}
+          +
+          +static BOOL checkImportDirectory(NSURL *directory, NSError **error) {
+          +    NSArray *keys = @[NSURLIsDirectoryKey, NSURLIsSymbolicLinkKey];
+          +    NSDictionary *properties = [directory resourceValuesForKeys:keys error:error];
+          +    if (!properties || ![properties[NSURLIsDirectoryKey] boolValue] || [properties[NSURLIsSymbolicLinkKey] boolValue]) {
+          +        return NO;
+          +    }
+          +    __block BOOL readable = YES;
+          +    NSDirectoryEnumerator<NSURL *> *files = [NSFileManager.defaultManager enumeratorAtURL:directory
+          +        includingPropertiesForKeys:keys options:0 errorHandler:^BOOL(NSURL *url, NSError *readError) {
+          +            readable = NO;
+          +            return NO;
+          +        }];
+          +    if (!files) return NO;
+          +    for (NSURL *url in files) {
+          +        NSNumber *symbolicLink;
+          +        if (![url getResourceValue:&symbolicLink forKey:NSURLIsSymbolicLinkKey error:error] || symbolicLink.boolValue) {
+          +            return NO;
+          +        }
+          +    }
+          +    return readable;
+          +}
+          +
+          +static NSError *importError(NSString *message) {
+          +    return [NSError errorWithDomain:@"ChaosPack" code:1 userInfo:@{NSLocalizedDescriptionKey: message}];
+          +}
+          +
+          +- (NSError *)copyPack:(NSURL *)source toInstance:(NSURL *)instance {
+          +    NSError *error = nil;
+          +    NSFileManager *fm = [NSFileManager new];
+          +    NSURL *target = [self chaosURLInInstance:instance];
+          +    if ([fm fileExistsAtPath:target.path]) {
+          +        return importError(@"目标目录已经存在。请先在「文件」App 备份并移走原目录。");
+          +    }
+          +    NSURL *mods = [source URLByAppendingPathComponent:@"mods" isDirectory:YES];
+          +    if (![fm fileExistsAtPath:mods.path]) return importError(@"所选目录没有 mods 文件夹。");
+          +    NSURL *parent = [target URLByDeletingLastPathComponent];
+          +    if (![fm createDirectoryAtURL:parent withIntermediateDirectories:YES attributes:nil error:&error]) return error;
+          +    NSURL *staging = [parent URLByAppendingPathComponent:[@".chaos-" stringByAppendingString:NSUUID.UUID.UUIDString] isDirectory:YES];
+          +    if (![fm createDirectoryAtURL:staging withIntermediateDirectories:NO attributes:nil error:&error]) return error;
+          +    for (NSString *name in @[@"mods", @"config", @"defaultconfigs", @"kubejs", @"saves", @"resourcepacks"]) {
+          +        NSURL *folder = [source URLByAppendingPathComponent:name isDirectory:YES];
+          +        if (![fm fileExistsAtPath:folder.path]) continue;
+          +        if (!checkImportDirectory(folder, &error)) {
+          +            if (!error) error = importError(@"整合包目录无法读取，或包含符号链接。");
+          +            break;
+          +        }
+          +        if (![fm copyItemAtURL:folder toURL:[staging URLByAppendingPathComponent:name] error:&error]) break;
+          +    }
+          +    if (!error && [fm moveItemAtURL:staging toURL:target error:&error]) return nil;
+          +    [fm removeItemAtURL:staging error:nil];
+          +    return error ?: importError(@"复制整合包失败。");
+          +}
+          +
+          +- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+          +    NSURL *source = urls.firstObject;
+          +    if (!source || self.importing) return;
+          +    self.importing = YES;
+          +    self.modalInPresentation = YES;
+          +    self.navigationItem.rightBarButtonItem.enabled = NO;
+          +    [self.tableView reloadData];
+          +    NSURL *instance = [self instanceURL];
+          +    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+          +        BOOL access = [source startAccessingSecurityScopedResource];
+          +        __block NSError *error = nil;
+          +        NSError *coordinationError = nil;
+          +        NSFileCoordinator *coordinator = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
+          +        [coordinator coordinateReadingItemAtURL:source options:0 error:&coordinationError byAccessor:^(NSURL *url) {
+          +            error = [self copyPack:url toInstance:instance];
+          +        }];
+          +        if (!error) error = coordinationError;
+          +        if (access) [source stopAccessingSecurityScopedResource];
+          +        dispatch_async(dispatch_get_main_queue(), ^{
+          +            self.importing = NO;
+          +            self.modalInPresentation = NO;
+          +            self.navigationItem.rightBarButtonItem.enabled = YES;
+          +            [self.tableView reloadData];
+          +            showDialog(error ? @"导入失败" : @"导入完成",
+          +                       error ? error.localizedDescription : @"点击「选用混沌版配置」，然后用启动器的 Play 按钮进入游戏。");
+          +        });
+          +    });
+          +}
+          +
+          +@end
+          diff --git a/scripts/build-cloud-ios.sh b/scripts/build-cloud-ios.sh
+          new file mode 100644
+          --- /dev/null
+          +++ b/scripts/build-cloud-ios.sh
+          @@ -0,0 +1,44 @@
+          +#!/usr/bin/env bash
+          +set -euo pipefail
+          +
+          +cd "$(dirname "$0")/.."
+          +
+          +if [[ "$(uname -s)" != Darwin ]]; then
+          +  echo "This build requires a macOS runner with Xcode and the iPhoneOS SDK." >&2
+          +  exit 1
+          +fi
+          +
+          +for tool in xcodebuild xcrun gmake cmake ldid curl unzip zip plutil; do
+          +  if ! command -v "$tool" >/dev/null; then
+          +    echo "Missing build tool: $tool" >&2
+          +    exit 1
+          +  fi
+          +done
+          +xcrun --sdk iphoneos --show-sdk-path >/dev/null
+          +boot_jdk="${BOOT_JDK_HOME:-$("/usr/libexec/java_home" -v 1.8)}"
+          +bundle_id="${CHAOS_BUNDLE_ID:-local.lumian.chaoslauncher}"
+          +if [[ ! "$bundle_id" =~ ^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$ ]]; then
+          +  echo "CHAOS_BUNDLE_ID must be a reverse-DNS identifier." >&2
+          +  exit 1
+          +fi
+          +for dependency in AFNetworking DBNumberedSlider MobileGlues fishhook; do
+          +  if [[ -z "$(ls -A "Natives/external/$dependency")" ]]; then
+          +    echo "Missing dependency: $dependency. Extract the source ZIP with all contents." >&2
+          +    exit 1
+          +  fi
+          +done
+          +
+          +gmake -j2 package PLATFORM=2 RELEASE=0 SLIMMED=0 SLIMMED_ONLY=0 \
+          +  RUNNER=0 BOOTJDK="$boot_jdk/bin" PACKAGE_BUNDLE_ID="$bundle_id" \
+          +  PACKAGE_ENTITLEMENTS=scripts/entitlements.development.plist \
+          +  BRANCH=chaos-ios COMMIT=f98c413 JOBS=2
+          +
+          +source_ipa="artifacts/org.angelauramc.amethyst-1.0-ios.ipa"
+          +output_ipa="artifacts/ChaosLauncher-iOS.ipa"
+          +test -s "$source_ipa"
+          +unzip -tq "$source_ipa"
+          +payload="artifacts/Payload/AngelAuraAmethyst.app"
+          +test "$(plutil -extract CFBundleIdentifier raw "$payload/Info.plist")" = "$bundle_id"
+          +test -f "$payload/java_runtimes/java-17-openjdk/lib/server/libjvm.dylib"
+          +cp "$source_ipa" "$output_ipa"
+          +shasum -a 256 "$output_ipa"
+          diff --git a/scripts/entitlements.development.plist b/scripts/entitlements.development.plist
+          new file mode 100644
+          --- /dev/null
+          +++ b/scripts/entitlements.development.plist
+          @@ -0,0 +1,8 @@
+          +<?xml version="1.0" encoding="UTF-8"?>
+          +<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          +<plist version="1.0">
+          +<dict>
+          +    <key>get-task-allow</key>
+          +    <true/>
+          +</dict>
+          +</plist>
+          CHAOS_SOURCE_PATCH
+          git apply --check "$patch_file"
+          git apply "$patch_file"
 
       - name: 配置 JDK 8
         uses: actions/setup-java@v4
@@ -32,6 +428,7 @@ jobs:
         run: brew install make ldid
 
       - name: 构建 iOS IPA
+        working-directory: launcher
         env:
           CHAOS_BUNDLE_ID: ${{ inputs.bundle_id }}
         run: BOOT_JDK_HOME="$JAVA_HOME" bash scripts/build-cloud-ios.sh
@@ -40,6 +437,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ChaosLauncher-iOS
-          path: artifacts/ChaosLauncher-iOS.ipa
+          path: launcher/artifacts/ChaosLauncher-iOS.ipa
           if-no-files-found: error
           compression-level: 0
+ 
